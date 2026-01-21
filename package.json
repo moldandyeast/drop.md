@@ -1,0 +1,22 @@
+{
+  "name": "drop-md",
+  "version": "1.0.0",
+  "description": "Ephemeral shared markdown. Create, share, disappear.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "yjs": "^13.6.10",
+    "lib0": "^0.2.88",
+    "nanoid": "^5.0.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240117.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.24.0"
+  }
+}

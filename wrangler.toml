@@ -1,0 +1,24 @@
+name = "drop-md"
+main = "src/index.ts"
+compatibility_date = "2024-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Objects binding
+[durable_objects]
+bindings = [
+  { name = "DOCUMENT", class_name = "Document" }
+]
+
+# Migrations for Durable Objects (SQLite-backed for free tier)
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Document"]
+
+# Development settings
+[dev]
+port = 8787
+local_protocol = "http"
+
+# Environment variables (for production, use wrangler secret)
+[vars]
+ENVIRONMENT = "development"
