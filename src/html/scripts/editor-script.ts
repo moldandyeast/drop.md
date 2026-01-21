@@ -1,12 +1,11 @@
 /**
  * Editor page JavaScript
  * 
- * This is the heart of the collaborative editing experience.
  * Uses Yjs for CRDT-based real-time sync over WebSocket.
  */
 export function editorScript(docId: string): string {
   return `
-    // Import Yjs from CDN (ESM)
+    // Import Yjs from CDN
     import * as Y from 'https://cdn.jsdelivr.net/npm/yjs@13.6.10/+esm';
 
     const docId = '${docId}';
@@ -22,60 +21,74 @@ export function editorScript(docId: string): string {
 
     // Message types matching the server
     const MessageType = {
-      SYNC_STEP1: 0,   // Request state vector
-      SYNC_STEP2: 1,   // Send state update
-      UPDATE: 2,       // Incremental update
+      SYNC_STEP1: 0,
+      SYNC_STEP2: 1,
+      UPDATE: 2,
     };
 
-    // lib0 encoding helpers (minimal implementation)
-    const encoding = {
-      createEncoder: () => ({ arr: [] }),
-      writeVarUint: (encoder, num) => {
-        while (num > 127) {
-          encoder.arr.push((num & 127) | 128);
-          num = Math.floor(num / 128);
+    // lib0-compatible encoding
+    function encodeMessage(type, data) {
+      const arr = [];
+      // Write varint for message type
+      let n = type;
+      while (n > 127) {
+        arr.push((n & 127) | 128);
+        n = Math.floor(n / 128);
+      }
+      arr.push(n & 127);
+      
+      if (data) {
+        // Write varint for length
+        let len = data.length;
+        while (len > 127) {
+          arr.push((len & 127) | 128);
+          len = Math.floor(len / 128);
         }
-        encoder.arr.push(num & 127);
-      },
-      writeVarUint8Array: (encoder, arr) => {
-        encoding.writeVarUint(encoder, arr.length);
-        for (let i = 0; i < arr.length; i++) {
-          encoder.arr.push(arr[i]);
+        arr.push(len & 127);
+        // Write data
+        for (let i = 0; i < data.length; i++) {
+          arr.push(data[i]);
         }
-      },
-      toUint8Array: (encoder) => new Uint8Array(encoder.arr),
-    };
+      }
+      return new Uint8Array(arr);
+    }
 
-    const decoding = {
-      createDecoder: (arr) => ({ arr, pos: 0 }),
-      readVarUint: (decoder) => {
-        let num = 0;
-        let mult = 1;
-        while (true) {
-          const byte = decoder.arr[decoder.pos++];
-          num += (byte & 127) * mult;
-          if (byte < 128) break;
-          mult *= 128;
-        }
-        return num;
-      },
-      readVarUint8Array: (decoder) => {
-        const len = decoding.readVarUint(decoder);
-        const arr = decoder.arr.slice(decoder.pos, decoder.pos + len);
-        decoder.pos += len;
-        return new Uint8Array(arr);
-      },
-    };
+    function decodeMessage(data) {
+      let pos = 0;
+      // Read varint for message type
+      let type = 0;
+      let mult = 1;
+      while (true) {
+        const byte = data[pos++];
+        type += (byte & 127) * mult;
+        if (byte < 128) break;
+        mult *= 128;
+      }
+      
+      // Read varint for length
+      let len = 0;
+      mult = 1;
+      while (true) {
+        const byte = data[pos++];
+        len += (byte & 127) * mult;
+        if (byte < 128) break;
+        mult *= 128;
+      }
+      
+      // Read data
+      const payload = data.slice(pos, pos + len);
+      return { type, payload };
+    }
 
     // State
-    let doc = new Y.Doc();
-    let text = doc.getText('content');
+    const doc = new Y.Doc();
+    const text = doc.getText('content');
     let ws = null;
-    let isRemoteUpdate = false;
     let isSynced = false;
     let reconnectAttempts = 0;
     let reconnectTimeout = null;
     let expiresAt = parseInt(timer.dataset.expires, 10);
+    let isUpdatingEditor = false;
 
     // ===== TIMER =====
     function updateTimer() {
@@ -100,17 +113,16 @@ export function editorScript(docId: string): string {
         timer.textContent = minutes + 'm';
       }
 
-      // Warning states
       timer.classList.remove('warning', 'danger');
-      if (remaining < 60 * 60 * 1000) { // < 1 hour
+      if (remaining < 60 * 60 * 1000) {
         timer.classList.add('danger');
-      } else if (remaining < 24 * 60 * 60 * 1000) { // < 1 day
+      } else if (remaining < 24 * 60 * 60 * 1000) {
         timer.classList.add('warning');
       }
     }
 
     updateTimer();
-    setInterval(updateTimer, 60000); // Update every minute
+    setInterval(updateTimer, 60000);
 
     // ===== COPY URL =====
     copyBtn.addEventListener('click', async () => {
@@ -122,7 +134,6 @@ export function editorScript(docId: string): string {
         await navigator.clipboard.writeText(url);
         copyIcon.style.display = 'none';
         copySuccess.style.display = 'flex';
-
         setTimeout(() => {
           copyIcon.style.display = 'flex';
           copySuccess.style.display = 'none';
@@ -137,7 +148,6 @@ export function editorScript(docId: string): string {
       statusDot.className = 'status-dot ' + status;
       statusText.textContent = status;
       
-      // Update live indicator
       if (status === 'connected') {
         liveIndicator.classList.remove('disconnected');
         liveText.textContent = 'live';
@@ -149,7 +159,6 @@ export function editorScript(docId: string): string {
       if (status === 'connecting' || status === 'disconnected') {
         connectionStatus.classList.add('visible');
       } else {
-        // Hide after connected for a moment
         setTimeout(() => {
           if (statusDot.classList.contains('connected')) {
             connectionStatus.classList.remove('visible');
@@ -163,7 +172,6 @@ export function editorScript(docId: string): string {
       const dotsContainer = presence.querySelector('.presence-dots');
       const textEl = presence.querySelector('.presence-text');
 
-      // Update dots
       dotsContainer.innerHTML = '';
       for (let i = 0; i < Math.min(count, 5); i++) {
         const dot = document.createElement('span');
@@ -171,77 +179,116 @@ export function editorScript(docId: string): string {
         dotsContainer.appendChild(dot);
       }
 
-      // Update text
       textEl.textContent = count === 1 ? '1' : count.toString();
     }
 
-    // ===== EDITOR SYNC =====
+    // ===== EDITOR LAYOUT =====
     const editorScroll = document.getElementById('editor-scroll');
     const spacerTop = document.querySelector('.editor-spacer-top');
 
-    // Auto-resize textarea to fit content
     function autoResize() {
       editor.style.height = 'auto';
       editor.style.height = editor.scrollHeight + 'px';
     }
 
-    // Smoothly adjust top spacer as content grows
-    function updateEditorState() {
+    function updateEditorLayout() {
       autoResize();
       
       const viewportHeight = editorScroll.clientHeight;
       const contentHeight = editor.scrollHeight;
-      
-      // Calculate spacer: starts at ~45% of viewport, shrinks as content grows
-      // When content is 0, spacer is 45vh (centered)
-      // When content fills viewport, spacer is 2rem (top)
       const maxSpacer = viewportHeight * 0.45;
-      const minSpacer = 32; // 2rem
-      
-      // Ratio: how much of available space is content using
+      const minSpacer = 32;
       const ratio = Math.min(contentHeight / (viewportHeight * 0.5), 1);
-      
-      // Lerp from max to min
       const spacerHeight = maxSpacer - (ratio * (maxSpacer - minSpacer));
       
       spacerTop.style.minHeight = Math.max(spacerHeight, minSpacer) + 'px';
     }
 
-    // When local text changes, apply to Yjs doc
-    let inputDebounce = null;
-    editor.addEventListener('input', () => {
-      updateEditorState();
-      if (isRemoteUpdate) return;
-
-      // Debounce to batch rapid changes
-      if (inputDebounce) clearTimeout(inputDebounce);
-      inputDebounce = setTimeout(() => {
-        const newValue = editor.value;
+    // ===== YTEXT <-> TEXTAREA BINDING =====
+    // Proper binding that computes minimal diffs
+    
+    function applyDiff(oldText, newText, ytext) {
+      // Find common prefix
+      let start = 0;
+      while (start < oldText.length && start < newText.length && oldText[start] === newText[start]) {
+        start++;
+      }
+      
+      // Find common suffix
+      let oldEnd = oldText.length;
+      let newEnd = newText.length;
+      while (oldEnd > start && newEnd > start && oldText[oldEnd - 1] === newText[newEnd - 1]) {
+        oldEnd--;
+        newEnd--;
+      }
+      
+      // Apply changes
+      const deleteCount = oldEnd - start;
+      const insertText = newText.slice(start, newEnd);
+      
+      if (deleteCount > 0 || insertText.length > 0) {
         doc.transact(() => {
-          text.delete(0, text.length);
-          text.insert(0, newValue);
+          if (deleteCount > 0) {
+            ytext.delete(start, deleteCount);
+          }
+          if (insertText.length > 0) {
+            ytext.insert(start, insertText);
+          }
         }, 'local');
-      }, 0);
+      }
+    }
+    
+    let lastKnownText = '';
+    
+    editor.addEventListener('input', () => {
+      if (isUpdatingEditor) return;
+      
+      const newText = editor.value;
+      applyDiff(lastKnownText, newText, text);
+      lastKnownText = newText;
+      
+      updateEditorLayout();
     });
 
     // When Yjs doc changes, update editor
-    text.observe(event => {
+    text.observe((event) => {
       if (event.transaction.origin === 'local') return;
-
-      isRemoteUpdate = true;
+      
+      isUpdatingEditor = true;
+      
+      const newText = text.toString();
       const cursorPos = editor.selectionStart;
-      const oldLength = editor.value.length;
+      const cursorEnd = editor.selectionEnd;
       
-      editor.value = text.toString();
-      updateEditorState();
+      // Calculate cursor adjustment based on changes before cursor
+      let adjustment = 0;
+      let pos = 0;
+      for (const delta of event.changes.delta) {
+        if (delta.retain) {
+          pos += delta.retain;
+        } else if (delta.insert) {
+          const insertLen = typeof delta.insert === 'string' ? delta.insert.length : delta.insert.length;
+          if (pos <= cursorPos) {
+            adjustment += insertLen;
+          }
+          pos += insertLen;
+        } else if (delta.delete) {
+          if (pos < cursorPos) {
+            adjustment -= Math.min(delta.delete, cursorPos - pos);
+          }
+        }
+      }
       
-      // Try to preserve cursor position
-      const newLength = editor.value.length;
-      const delta = newLength - oldLength;
-      const newPos = Math.max(0, Math.min(cursorPos + delta, newLength));
-      editor.setSelectionRange(newPos, newPos);
+      editor.value = newText;
+      lastKnownText = newText;
       
-      isRemoteUpdate = false;
+      // Restore cursor with adjustment
+      const newCursorPos = Math.max(0, Math.min(cursorPos + adjustment, newText.length));
+      const newCursorEnd = Math.max(0, Math.min(cursorEnd + adjustment, newText.length));
+      editor.setSelectionRange(newCursorPos, newCursorEnd);
+      
+      updateEditorLayout();
+      isUpdatingEditor = false;
     });
 
     // ===== WEBSOCKET =====
@@ -259,30 +306,23 @@ export function editorScript(docId: string): string {
         console.log('WebSocket connected');
         setConnectionStatus('connected');
         reconnectAttempts = 0;
-
-        // Request initial sync
-        requestSync();
       };
 
       ws.onmessage = (event) => {
-        // Binary message = Yjs sync
         if (event.data instanceof ArrayBuffer) {
           const data = new Uint8Array(event.data);
           handleBinaryMessage(data);
-        }
-        // String message = JSON
-        else if (typeof event.data === 'string') {
+        } else if (typeof event.data === 'string') {
           try {
-            const message = JSON.parse(event.data);
-            handleJsonMessage(message);
+            handleJsonMessage(JSON.parse(event.data));
           } catch (err) {
-            console.error('Invalid JSON message:', err);
+            console.error('Invalid JSON:', err);
           }
         }
       };
 
       ws.onclose = (event) => {
-        console.log('WebSocket closed:', event.code, event.reason);
+        console.log('WebSocket closed:', event.code);
         setConnectionStatus('disconnected');
         ws = null;
         scheduleReconnect();
@@ -295,11 +335,8 @@ export function editorScript(docId: string): string {
 
     function scheduleReconnect() {
       if (reconnectTimeout) return;
-
-      // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
       const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
       reconnectAttempts++;
-
       console.log('Reconnecting in ' + delay + 'ms...');
       reconnectTimeout = setTimeout(() => {
         reconnectTimeout = null;
@@ -307,32 +344,23 @@ export function editorScript(docId: string): string {
       }, delay);
     }
 
-    function requestSync() {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-      const encoder = encoding.createEncoder();
-      encoding.writeVarUint(encoder, MessageType.SYNC_STEP1);
-      ws.send(encoding.toUint8Array(encoder));
-    }
-
     function handleBinaryMessage(data) {
-      const decoder = decoding.createDecoder(data);
-      const messageType = decoding.readVarUint(decoder);
+      const { type, payload } = decodeMessage(data);
 
-      if (messageType === MessageType.SYNC_STEP2 || messageType === MessageType.UPDATE) {
-        // Apply the update
-        const update = decoding.readVarUint8Array(decoder);
-        
+      if (type === MessageType.SYNC_STEP2 || type === MessageType.UPDATE) {
         try {
-          Y.applyUpdate(doc, update, 'remote');
+          Y.applyUpdate(doc, payload, 'remote');
           
-          if (!isSynced && messageType === MessageType.SYNC_STEP2) {
+          if (!isSynced && type === MessageType.SYNC_STEP2) {
             isSynced = true;
-            // Send our local state too (in case we have unsaved changes)
-            sendLocalState();
+            // Sync local state back
+            lastKnownText = text.toString();
+            editor.value = lastKnownText;
+            updateEditorLayout();
+            sendUpdate(Y.encodeStateAsUpdate(doc));
           }
         } catch (err) {
-          console.error('Failed to apply Yjs update:', err);
+          console.error('Failed to apply update:', err);
         }
       }
     }
@@ -343,72 +371,44 @@ export function editorScript(docId: string): string {
           expiresAt = message.expiresAt;
           updateTimer();
           break;
-
         case 'presence':
           updatePresence(message.count);
           break;
-
         case 'expired':
           alert('This document has expired.');
           window.location.href = '/';
           break;
-
         case 'error':
           console.error('Server error:', message.message);
-          if (message.message.includes('size limit')) {
-            alert('Document size limit exceeded (512KB). Some changes may not be saved.');
-          }
           break;
       }
     }
 
-    function sendLocalState() {
+    function sendUpdate(update) {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-      const state = Y.encodeStateAsUpdate(doc);
-      const encoder = encoding.createEncoder();
-      encoding.writeVarUint(encoder, MessageType.UPDATE);
-      encoding.writeVarUint8Array(encoder, state);
-
-      ws.send(encoding.toUint8Array(encoder));
+      ws.send(encodeMessage(MessageType.UPDATE, update));
     }
 
-    // Send updates when local changes happen
+    // Send Yjs updates to server
     doc.on('update', (update, origin) => {
       if (origin === 'remote') return;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-      const encoder = encoding.createEncoder();
-      encoding.writeVarUint(encoder, MessageType.UPDATE);
-      encoding.writeVarUint8Array(encoder, update);
-
-      ws.send(encoding.toUint8Array(encoder));
+      sendUpdate(update);
     });
 
-    // Start connection
+    // Start
     connect();
-
-    // Initialize editor state
-    updateEditorState();
-
-    // Focus editor
+    updateEditorLayout();
     editor.focus();
 
-    // Handle window resize
-    window.addEventListener('resize', updateEditorState);
+    window.addEventListener('resize', updateEditorLayout);
 
-    // Handle page visibility
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          connect();
-        }
+      if (document.visibilityState === 'visible' && (!ws || ws.readyState !== WebSocket.OPEN)) {
+        connect();
       }
     });
 
-    // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
-      // Cmd/Ctrl+S to download
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
         const a = document.createElement('a');
