@@ -38,7 +38,7 @@ export function landingPage(): string {
     </div>
     
     <footer class="landing-footer">
-      <span class="footer-text">set in <a href="https://vercel.com/font" target="_blank">geist mono</a></span>
+      <span class="footer-text">by <a href="https://x.com/nilsedison" target="_blank">@nilsedison</a> · set in <a href="https://vercel.com/font" target="_blank">geist mono</a></span>
     </footer>
   </div>
   
